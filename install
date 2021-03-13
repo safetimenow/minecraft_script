@@ -1,0 +1,782 @@
+#!/bin/bash
+
+# This feature on Category5 Technology TV sponsored by ameriDroid.com
+# USA-based SBC sales with unmatched support and fast shipping
+# To power your Minecraft Server, get a Raspberry Pi 4 from https://ameridroid.com
+
+# Corresponding video series: https://category5.tv/feature/minecraft
+
+pcver="2.1"
+
+if [[ $EUID -ne 0 ]]; then
+  echo "ERROR: This script must be run as root" 2>&1
+  exit 1
+fi
+
+# Install the web interface
+#psi=1
+
+# Prevent running multiple apt updates
+updated=0
+
+# Place the current folder in a variable to use as a base source folder
+base=$(pwd)
+
+# dialog allows me to create a pretty installer
+# It is a required dependency since Pinecraft 1.1
+dialog=$(which dialog)
+if [[ $dialog == "" ]]; then
+  printf "Installing dialog... "
+  if [[ $updated == 0 ]]; then
+    apt-get update > /dev/null 2>&1
+    updated=1
+  fi
+  apt-get -y install dialog > /dev/null 2>&1
+  dialog=$(which dialog)
+  if [[ $dialog == "" ]]; then
+    echo "Failed. Aborting. Install dialog first."
+    exit 0
+  else
+    echo "Success."
+  fi
+fi
+
+dialog --title "Pinecraft $pcver" \
+--msgbox "
+ Pinecraft: The Minecraft Server Installer
+      For Raspberry Pi and Other SBCs
+
+    By Robbie Ferguson // The Bald Nerd
+  https://category5.tv/feature/minecraft
+
+         Installer Version: $pcver
+         Minecraft Version: Latest
+
+         Sponsored by ameriDroid
+         https://ameridroid.com/
+" 17 48
+
+
+dialog --infobox "Checking dependencies..." 3 34 ; sleep 2
+
+if type -p java > /dev/null; then
+    _java=java
+elif [[ -n "$JAVA_HOME" ]] && [[ -x "$JAVA_HOME/bin/java" ]];  then
+    _java="$JAVA_HOME/bin/java"
+else
+  dialog --infobox "Installing Java..." 3 34 ;
+
+  if [[ $updated == 0 ]]; then
+    apt-get update > /dev/null 2>&1
+    updated=1
+  fi
+  # First attemp is the default-jre-headless metapackage
+  apt-get -y install default-jre-headless > /dev/null 2>&1
+
+  if type -p java > /dev/null; then
+    _java=java
+  elif [[ -n "$JAVA_HOME" ]] && [[ -x "$JAVA_HOME/bin/java" ]];  then
+    _java="$JAVA_HOME/bin/java"
+  else
+    # Presumably the default-jre package didn't work on this distro, so try specific version
+    apt-get -y install openjdk-11-jre-headless > /dev/null 2>&1
+#    apt-get -y install openjdk-10-jre-headless > /dev/null 2>&1
+  fi
+  if type -p java > /dev/null; then
+    _java=java
+  elif [[ -n "$JAVA_HOME" ]] && [[ -x "$JAVA_HOME/bin/java" ]];  then
+    _java="$JAVA_HOME/bin/java"
+  else
+    dialog --title "Error" \
+      --msgbox "\nJava installation failed. Please install the JRE first and try again." 8 50
+    echo
+    echo
+    echo "Failed."
+    echo
+    exit 0
+  fi
+fi
+
+javaver=0
+if [[ "$_java" ]]; then
+  javaver=$("$_java" -version 2>&1 | awk -F '"' '/version/ {print $2}')
+fi
+
+ver=0
+for i in $(echo $javaver | tr "." "\n")
+do
+  if [[ $ver == 0 ]]; then
+    ver=$i
+  else
+    subver=$i
+    break
+  fi
+done
+
+if [[ $ver > 8 ]] || [[ $ver == 1 ]] && [[ $subver > 8 ]]; then
+  dialog --title "Error" \
+      --msgbox "\n`which java` is version ${javaver}. You'll need a newer version of JRE." 8 50
+  echo
+  echo
+  echo "Failed."
+  echo
+  exit 0
+fi
+
+if [ $(dpkg-query -W -f='${Status}' git 2>/dev/null | grep -c "ok installed") -eq 0 ]; then
+  dialog --infobox "Installing git..." 3 34 ;
+  if [[ $updated == 0 ]]; then
+    apt-get update > /dev/null 2>&1
+    updated=1
+  fi
+  apt-get -y install git > /dev/null 2>&1
+fi
+git config --global --unset core.autocrlf
+
+
+vanilla="https://launcher.mojang.com/v1/objects/1b557e7b033b583cd9f66746b7a9ab1ec1673ced/server.jar"
+flavor=""
+
+exec 3>&1
+result=$(dialog --title "Pinecraft $pcver" \
+         --menu "Choose your Minecraft server type:" 20 40 10 \
+         "P"       "Paper (Default)" \
+         "F"       "Fabric" \
+         "S"       "Spigot" \
+         "C"       "Cuberite (Experimental!)" \
+         "V"       "Vanilla" \
+       2>&1 1>&3);
+
+if [[ $? == 0 ]]; then
+  case $result in
+    S)
+      flavor="Spigot"
+      url="https://hub.spigotmc.org/jenkins/job/BuildTools/lastSuccessfulBuild/artifact/target/BuildTools.jar"
+      jarname="spigot-*.jar"
+      switches=""
+      ;;
+    F)
+      flavor="Fabric"
+      url="https://maven.fabricmc.net/net/fabricmc/fabric-installer/0.6.1.51/fabric-installer-0.6.1.51.jar"
+      jarname="fabric-server-launch.jar"
+      switches="server"
+      dlvanilla=1
+      ;;
+    V)
+      flavor="Vanilla"
+      url=$vanilla
+      jarname="server.jar"
+      switches=""
+      ;;
+    P)
+      flavor="Paper"
+      url="https://papermc.io/api/v2/projects/paper/versions/1.16.5/builds/467/downloads/paper-1.16.5-467.jar"
+      jarname="minecraft.jar"
+      switches=""
+      ;;
+    C)
+      flavor="Cuberite"
+      script="https://compile.cuberite.org"
+      executable="Cuberite"
+      compiler=1;
+      ;;
+    esac
+else
+  echo
+  echo
+  echo "Aborted."
+  echo
+  exit 1
+fi
+if [[ $flavor == "" ]]; then
+  echo
+  echo
+  echo "Aborted."
+  echo
+  exit 1
+fi
+
+exec 3>&1
+result=$(dialog --title "Pinecraft $pcver" \
+         --menu "Choose your game type:" 20 40 10 \
+         "S"       "Survival" \
+         "C"       "Creative" \
+       2>&1 1>&3);
+
+if [[ $? == 0 ]]; then
+  case $result in
+    S)
+      gamemode="survival"
+      ;;
+    C)
+      gamemode="creative"
+      ;;
+    esac
+else
+  echo
+  echo
+  echo "Aborted."
+  echo
+  exit 1
+fi
+
+# Username may be provided on CLI as in 1.0
+user=$1
+
+if [[ $user == "" ]]; then
+  validuser=""
+else
+  validuser=$(getent passwd $user)
+fi
+while [[ $validuser == "" ]]
+do
+
+  user=$(dialog --stdout --title "Linux User" \
+    --inputbox "Linux Username for Server" 8 50)
+
+  case $? in
+  0)
+   if [[ $user == "" ]]; then
+    validuser=""
+   else
+    validuser=$(getent passwd $user)
+   fi
+   if [[ $validuser == "" ]]; then
+     dialog --title "Error" \
+       --msgbox "\n $user does not exist." 6 50
+   fi
+   ;;
+  1)
+   echo
+   echo
+   echo "Aborted."
+   echo
+   exit 1 ;;
+  esac
+
+done
+
+
+dialog --title "End-User License Agreement"  --yesno "In order to proceed, you must read and accept the EULA at https://account.mojang.com/documents/minecraft_eula\n\nDo you accept the EULA?" 8 60
+
+  case $? in
+  0)
+   eula="accepted"
+   eula_stamp=$(date)
+   ;;
+  1)
+   echo
+   echo
+   echo "EULA not accepted. You are not permitted to install this software."
+   echo
+   exit 1 ;;
+  esac
+
+
+
+instdir="/home/$user/minecraft/"
+
+upgrade=0
+if [[ -e /home/$user ]]; then
+  if [[ -e ${instdir} ]]; then
+    if [[ ! -e ${instdir}cat5tv.ver ]]; then
+      dialog --title "Error"\
+        --msgbox "\n${instdir} already exists, but is not created by Pinecraft.\n\nPlease move or remove the folder and try again." 11 50
+      exit 0
+    else
+      dialog --title "Upgrade"  --yesno "\nPinecraft is already installed. Upgrade?" 8 40
+      case $? in
+      1)
+       echo
+       echo
+       echo "Aborted"
+       echo
+       exit 1 ;;
+      esac
+
+      upgrade=1
+
+    fi
+  fi
+else
+  echo "Aborting: $user does not have a homedir."
+  exit 1
+fi
+
+# Gather some info about your system which will be used to determine the config
+revision=$(cat /proc/cpuinfo | grep 'Revision' | awk '{print $3}')
+board="Unknown" # Default will be overridden if determined
+memtotal=$(cat /proc/meminfo | grep MemTotal | awk '{print $2}') # Amount of memory in KB
+memavail=$(cat /proc/meminfo | grep MemAvailable | awk '{print $2}') # Amount of memory in KB
+memvariance=$(($memtotal - $memavail)) # Figure out how much memory is being used so we can make dynamic decisions for this board
+mem=$(( (($memtotal - $memvariance) / 1024) - 518)) # Amount of memory in MB
+memreservation=$((($memavail * 20/100) / 1024)) # Reserve memory for system (Failure to do this will cause "Error occurred during initialization of VM")
+gamemem=$(($mem - $memreservation)) # Calculate how much memory we can give to the game server (in MB)
+gamememMIN=$((($mem * 80/100) - 1024)) # Figure a MINIMUM amount of memory to allocate
+# Seriously, if you have 100 GB RAM, we don't need more than 12 of it
+if (( $gamemem > 12000 )); then
+    gamemem=12288
+    gamememMIN=1500
+fi
+oc_volt=0
+oc_friendly="N/A"
+if (( $gamememMIN < 0 )); then
+  dialog --title "Error" \
+    --msgbox "
+YOU DON'T HAVE ENOUGH AVAILABLE RAM
+
+Your system shows only $((${memavail} / 1024))MB RAM available, but with the applications running you have only $mem MB RAM available for allocation, which doesn't leave enough for overhead. Typically I'd want to be able to allocate at least 2 GB RAM.
+
+Either you have other things running, or your board is simply not good enough to run a Minecraft server." 18 50
+   echo
+   echo
+   echo "Failed. Not enough memory available for Minecraft server."
+   echo
+   exit 0
+fi
+
+if [[ "$revision" == *"b03111" ]] ||
+   [[ "$revision" == *"b03112" ]] ||
+   [[ "$revision" == *"c03111" ]] ||
+   [[ "$revision" == *"c03112" ]] ||
+   [[ "$revision" == *"d03114" ]]; then
+     board='Raspberry Pi 4'
+     boardnum=1
+     oc_volt=4
+     oc_freq=1900
+     oc_friendly="1.9 GHz"
+elif [[ "$revision" == *"c03130" ]]; then
+  board='Raspberry Pi 400'
+  boardnum=2
+  oc_volt=6
+  oc_freq=2000
+  oc_friendly="2.0 GHz"
+fi
+
+if (( $gamemem > 3800 )); then
+  kernel=$(uname -a)
+  if [[ ! "$kernel" == *"amd64"* ]] && [[ ! "$kernel" == *"arm64"* ]] && [[ ! "$kernel" == *"aarch64"* ]] && [[ ! "$kernel" == *"x86_64"* ]]; then
+
+    dialog --title "Warning" \
+    --msgbox "
+WARNING: 32-Bit OS on 64-Bit Board!
+
+Upgrade your distro to 64-bit to use your RAM.
+
+Since you are only using a 32-bit OS, you cannot use more than 4 GB RAM for Minecraft. Abort and Upgrade." 13 50
+
+    gamemem=2500
+    gamememMIN=1500
+
+  fi
+else if (( $gamememMIN < 1024 )); then
+  dialog --title "Warning" --yesno "\nWARNING: Either you have other things running, or your board is simply not good enough to run a Minecraft server. It is recommended you abort. ONLY install this on a dedicated system with no desktop environment or other applications running.\n\nWould you like to ABORT?" 14 50
+  case $? in
+  0)
+   echo
+   echo
+   echo "Aborted."
+   echo
+   exit 1 ;;
+  esac
+fi
+fi
+
+dialog --title "Information" \
+--msgbox "
+Detected Hardware:
+$board
+
+RAM to Allocate:
+${gamememMIN##*( )}MB - ${gamemem##*( )}MB
+
+Overclock To:
+$oc_friendly
+
+Server User:
+$user
+
+Server Version:
+$flavor ($gamemode)" 20 50
+
+if [[ ! $oc_volt == 0 ]]; then
+  dialog --title "Confirmation"  --yesno "\nI will be overwriting your /boot/config.txt file to overclock this ${board}. I am not responsible for damage to your system, and you do this at your own risk.\n\nContinue?" 12 50
+  case $? in
+  1)
+   echo
+   echo
+   echo "Aborted."
+   echo
+   exit 1 ;;
+  esac
+fi
+
+dialog --title "Pinecraft $pcver"  --yesno "Automatically load the server on boot?" 6 60
+  case $? in
+  0)
+   cron=1
+   ;;
+  1)
+   cron=0
+   ;;
+  esac
+
+#dialog --title "Pinecraft $pcver"  --yesno "Install Pinecraft Settings Interface?" 6 60
+#  case $? in
+#  0)
+#   psi=1
+#   ;;
+#  1)
+#   psi=0
+#   ;;
+#  esac
+
+
+if [[ $upgrade == 0 ]]; then
+  mkdir $instdir
+fi
+cd $instdir
+
+# Install Spigot Minecraft Server rather than Vanilla. Great performance with possibility to mod.
+if [[ $upgrade == 1 ]]; then
+  rm -rf src
+fi
+mkdir src && cd src
+
+# Install the tools needed to compile C code
+if [[ $compiler == 1 ]]; then
+
+  if [ $(dpkg-query -W -f='${Status}' gcc 2>/dev/null | grep -c "ok installed") -eq 0 ]; then
+    dialog --infobox "Installing gcc..." 3 34 ;
+    if [[ $updated == 0 ]]; then
+      apt-get update > /dev/null 2>&1
+      updated=1
+    fi
+    apt-get -y install gcc > /dev/null 2>&1
+  fi
+
+  if [ $(dpkg-query -W -f='${Status}' g++ 2>/dev/null | grep -c "ok installed") -eq 0 ]; then
+    dialog --infobox "Installing g++..." 3 34 ;
+    if [[ $updated == 0 ]]; then
+      apt-get update > /dev/null 2>&1
+      updated=1
+    fi
+    apt-get -y install g++ > /dev/null 2>&1
+  fi
+
+  if [ $(dpkg-query -W -f='${Status}' cmake 2>/dev/null | grep -c "ok installed") -eq 0 ]; then
+    dialog --infobox "Installing cmake..." 3 34 ;
+    if [[ $updated == 0 ]]; then
+      apt-get update > /dev/null 2>&1
+      updated=1
+    fi
+    apt-get -y install cmake > /dev/null 2>&1
+  fi
+
+fi
+
+
+# The server version requires the supplemental download of the vanilla server
+if [[ "$dlvanilla" = "1" ]]; then
+  dialog --infobox "Downloading Vanilla..." 3 34 ;
+  wget $vanilla -O ${instdir}server.jar > /dev/null 2>&1
+fi
+
+dialog --infobox "Downloading ${flavor}..." 3 34 ; sleep 1
+
+if [[ $jarname != "" ]]; then
+
+  wget $url -O minecraft.jar > /dev/null 2>&1
+
+elif [[ $script != "" ]]; then
+
+  wget $script -O minecraft.sh > /dev/null 2>&1
+
+else
+
+  # This should never happen. No URL or Script for selection
+  echo
+  echo
+  echo "Died."
+  echo
+  exit 0
+
+fi
+
+dialog --infobox "Installing ${flavor}..." 3 34 ;
+if [[ $url == $vanilla ]]; then
+  # Vanilla doesn't need to be compiled, just copy the file
+  cp minecraft.jar server.jar
+elif [[ $flavor == "Cuberite" ]]; then
+  sh minecraft.sh -m Release -t 1
+  cuberiteresponse=$?
+else
+  java -Xmx500M -jar minecraft.jar $switches > /dev/null 2&>1
+fi
+
+if [[ $flavor == "Cuberite" ]]; then
+
+  if [[ $cuberiteresponse != 0 ]]; then
+    dialog --title "Error" \
+      --msgbox "\nSadly, it appears compiling failed." 8 50
+    echo
+    echo
+    echo "Failed."
+    echo
+    exit 0
+  else
+    mv cuberite/build-cuberite/Server/* $instdir
+  fi
+
+else
+
+  jarfile=$(ls ${instdir}src/${jarname})
+  if [[ $jarfile == "" ]]; then
+    dialog --title "Error" \
+      --msgbox "\nSadly, it appears compiling failed." 8 50
+    echo
+    echo
+    echo "Failed."
+    echo
+    exit 0
+  else
+    cp $jarfile $instdir
+    t=${jarfile#*-}
+    version=$(basename $t .jar)
+  fi
+
+fi
+
+
+
+if [[ $psi == 1 ]]; then
+
+  # PHP interpreter / server for Pinecraft configuration interface
+  if [ $(dpkg-query -W -f='${Status}' php 2>/dev/null | grep -c "ok installed") -eq 0 ]; then
+    dialog --infobox "Installing PHP..." 3 34 ;
+    if [[ $updated == 0 ]]; then
+      apt-get update > /dev/null 2>&1
+      updated=1
+    fi
+    apt-get -y install php-cli > /dev/null 2>&1
+  fi
+
+  if [[ ! -d /etc/pinecraft/psi/ ]]; then
+    mkdir -p /etc/pinecraft/psi
+  fi
+
+  cp ${base}/assets/psi/* /etc/pinecraft/psi/
+
+  printf '{"pcver":"%s","instdir":"%s","flavor":"%s"}\n' "$pcver" "$instdir" "$flavor" > /etc/pinecraft/psi/psi.json
+
+  chown -R $user:$user /etc/pinecraft/
+fi
+
+
+
+###############################################
+# Create the scripts
+###############################################
+
+dialog --infobox "Creating scripts..." 3 34 ; sleep 1
+
+# Create the run script
+echo '#!/bin/bash
+cd "$(dirname "$0")"' > ${instdir}server
+if [[ $flavor == "Cuberite" ]]; then
+  echo ${instdir}cuberite/Cuberite >> ${instdir}server
+else
+  echo "exec java -Xms${gamememMIN}M -Xmx${gamemem}M -jar `basename $jarfile` --nogui" >> ${instdir}server
+fi
+chmod +x ${instdir}server
+# Need to generate the config and EULA
+if [[ $upgrade == 0 ]] || [[ ! -e ${instdir}server.properties ]]; then
+  dialog --infobox "Initializing server..." 3 34 ; sleep 1
+  ${instdir}server > /dev/null 2>&1
+fi
+if [[ $eula == "accepted" ]]; then
+  echo "# https://account.mojang.com/documents/minecraft_eula ACCEPTED by user during installation
+# $eula_stamp
+eula=true" > ${instdir}eula.txt
+fi
+
+# Create the safe reboot script
+echo '#!/bin/bash
+if [[ $EUID -ne 0 ]]; then
+  echo "ERROR: This script must be run as root" 2>&1
+  exit 1
+fi
+pid=`pidof java`
+if [[ $pid != "" ]]; then
+  printf "Minecraft is running. Waiting."
+  kill -SIGHUP $pid
+fi
+while [[ $pid != "" ]]; do
+  pid=`pidof java`
+  sleep 3
+  printf "."
+done
+echo
+echo "Rebooting."
+/sbin/reboot' > ${instdir}reboot
+chmod +x ${instdir}reboot
+
+# Create the safe stop script
+echo '#!/bin/bash
+pid=`pidof java`
+if [[ $pid != "" ]]; then
+  printf "Stopping Minecraft Server. This will take time."
+  kill -SIGHUP $pid
+fi
+while [[ $pid != "" ]]; do
+  pid=`pidof java`
+  sleep 3
+  printf "."
+done
+echo
+echo "Done. Minecraft has been stopped safely."' > ${instdir}stop
+chmod +x ${instdir}stop
+
+###############################################
+# /Create the scripts
+###############################################
+
+
+###############################################
+# Create config folders
+###############################################
+
+  if [[ ! -d /etc/pinecraft/pid/ ]]; then
+    mkdir -p /etc/pinecraft/pid
+  fi
+
+  chown -R $user:$user /etc/pinecraft/
+
+###############################################
+# /Create config folders
+###############################################
+
+
+###############################################
+# Overclock
+###############################################
+
+if [[ ! $oc_volt == 0 ]]; then
+  dialog --infobox "Overclocking your system to ${oc_friendly}..." 3 34 ; sleep 1
+  datestamp=$(date +"%Y-%m-%d_%H-%M-%S")
+  cp /boot/config.txt /boot/config-${datestamp}.txt
+  echo "over_voltage=$oc_volt
+arm_freq=$oc_freq
+dtparam=audio=off" > /boot/config.txt
+fi
+
+###############################################
+# /Overclock
+###############################################
+
+
+###############################################
+# Tweak Server Configs
+###############################################
+
+if [[ -e ${instdir}server.properties ]]; then
+
+  dialog --infobox "Applying config..." 3 34 ; sleep 1
+  # These settings are my own defaults, so only do these during first install (not upgrade)
+  # Will not replace user-configured changes in the server.properties
+  if [[ $upgrade == 0 ]]; then
+    /bin/sed -i '/difficulty=/c\difficulty=hard' ${instdir}server.properties
+    /bin/sed -i '/hardcore=/c\hardcore=true' ${instdir}server.properties
+    /bin/sed -i '/view-distance=/c\view-distance=7' ${instdir}server.properties
+  fi
+
+  # These ones, however, are selected by the user, so we'll make these changes even if already installed
+  /bin/sed -i "/gamemode=/c\gamemode=${gamemode}" ${instdir}server.properties
+
+fi
+
+###############################################
+# /Tweak Server Configs
+###############################################
+
+
+# Create a file to later let us know the version of Pinecraft used
+echo $pcver > ${instdir}cat5tv.ver
+
+# Set ownership to the user
+chown -R $user:$user $instdir
+
+
+
+###############################################
+# Install cronjob to auto-start server on boot
+###############################################
+
+# Dump current crontab to tmp file
+  crontab -u $user -l > /tmp/cron.tmp 2>/dev/null
+
+  if [[ "$cron" == "1" ]]; then
+    # Add server to auto-load at boot if doesn't already exist in crontab
+    if ! grep -q "minecraft/server" /tmp/cron.tmp; then
+      dialog --infobox "Enabling auto-run..." 3 34 ; sleep 1
+      printf "\n@reboot ${instdir}server > /dev/null 2>&1\n" >> /tmp/cron.tmp
+      cronupdate=1
+    fi
+  else
+    # Just in case it was previously enabled, disable it
+    # as this user requested not to auto-run
+    /bin/sed -i~ "\~@reboot ${instdir}server~d" /tmp/cron.tmp
+    cronupdate=1
+  fi
+
+  if [[ $psi == 1 ]]; then
+    if ! grep -q "pinecraft/psi/psi.php" /tmp/cron.tmp; then
+      dialog --infobox "Enabling Pinecraft SI..." 3 34 ; sleep 1
+      php=$(type -p php)
+      printf "\n@reboot $php -S 0.0.0.0:8088 -t /etc/pinecraft/psi/ > /dev/null 2>&1\n" >> /tmp/cron.tmp
+      cronupdate=1
+    fi
+  fi
+
+  # Import revised crontab
+  if [[ "$cronupdate" == "1" ]]
+  then
+    crontab -u $user /tmp/cron.tmp
+  fi
+
+  # Remove temp file
+  rm /tmp/cron.tmp
+
+###############################################
+# /Install cronjob to auto-start server on boot
+###############################################
+
+if [[ -e ${instdir}server.properties ]]; then
+  dialog --title "Success" \
+      --msgbox "\n$flavor Minecraft server installed successfully." 8 50
+else
+  dialog --title "Warning" \
+      --msgbox "\n$flavor appears to have installed, but is not initializing correctly. It is unlikely to work until this is resolved." 9 50
+fi
+
+if [[ "$cron" == "1" ]]; then
+  echo
+  echo
+  echo "Reboot now to activate the server."
+  echo "Remember: First boot will take ~10 minutes to build your world. Be patient."
+  echo
+  echo "To reboot, run this command as the $user user:"
+  echo "sudo ~/minecraft/reboot"
+  echo
+else
+  echo
+  echo
+  echo "Installation complete."
+  echo
+  echo "Remember: The first time you load your server it will"
+  echo "take time to build your world. Be patient."
+  echo
+  echo "To start your server, run this command as the $user user:"
+  echo "~/minecraft/server"
+  echo
+fi
